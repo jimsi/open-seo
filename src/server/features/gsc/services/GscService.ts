@@ -277,24 +277,27 @@ async function inspectUrls(input: {
     userId: connection.connectedByUserId,
     gscAccountId: connection.gscAccountId ?? undefined,
   });
-  const results: GscUrlInspection[] = [];
-  for (const url of input.urls) {
-    try {
-      const result = await client.inspectUrl(
-        connection.siteUrl,
-        url,
-        input.languageCode,
-      );
-      results.push({ url, result });
-    } catch (error) {
-      if (error instanceof GscTokenError) throw error;
-      results.push({
-        url,
-        result: null,
-        error: error instanceof Error ? error.message : "Inspection failed",
-      });
-    }
-  }
+  // Inspections are independent (the client mints its token once), so run
+  // them concurrently to keep 10-URL batches well inside the request timeout.
+  const results = await Promise.all(
+    input.urls.map(async (url): Promise<GscUrlInspection> => {
+      try {
+        const result = await client.inspectUrl(
+          connection.siteUrl,
+          url,
+          input.languageCode,
+        );
+        return { url, result };
+      } catch (error) {
+        if (error instanceof GscTokenError) throw error;
+        return {
+          url,
+          result: null,
+          error: error instanceof Error ? error.message : "Inspection failed",
+        };
+      }
+    }),
+  );
   return {
     siteUrl: connection.siteUrl,
     connectedBy: connection.connectedAccountEmail,

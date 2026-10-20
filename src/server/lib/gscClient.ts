@@ -84,7 +84,18 @@ export function createGscClient(opts: {
   userId: string;
   gscAccountId?: string;
 }) {
-  async function getToken(): Promise<string> {
+  // One client serves one request; batch callers (inspect_urls) would
+  // otherwise run Better Auth's token lookup + decrypt once per URL.
+  let tokenPromise: Promise<string> | undefined;
+  function getToken(): Promise<string> {
+    tokenPromise ??= mintToken().catch((error: unknown) => {
+      tokenPromise = undefined;
+      throw error;
+    });
+    return tokenPromise;
+  }
+
+  async function mintToken(): Promise<string> {
     let result: { accessToken?: string } | undefined;
     try {
       // Headerless call: getAccessToken trusts body.userId when no request

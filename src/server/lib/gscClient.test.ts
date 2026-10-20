@@ -68,6 +68,37 @@ describe("gscClient", () => {
     });
   });
 
+  it("mints the access token once per client across calls", async () => {
+    mocks.fetch.mockImplementation(async () =>
+      jsonResponse({ inspectionResult: {} }),
+    );
+    const { createGscClient } = await import("./gscClient");
+    const client = createGscClient({ userId: "u1" });
+
+    await Promise.all([
+      client.inspectUrl("sc-domain:x.com", "https://x.com/a"),
+      client.inspectUrl("sc-domain:x.com", "https://x.com/b"),
+      client.inspectUrl("sc-domain:x.com", "https://x.com/c"),
+    ]);
+
+    expect(mocks.getAccessToken).toHaveBeenCalledTimes(1);
+    expect(mocks.fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("retries minting after a failed token lookup", async () => {
+    mocks.getAccessToken
+      .mockRejectedValueOnce(new Error("transient"))
+      .mockResolvedValueOnce({ accessToken: "tok_456" });
+    mocks.fetch.mockImplementation(async () => jsonResponse({ siteEntry: [] }));
+    const { createGscClient } = await import("./gscClient");
+    const client = createGscClient({ userId: "u1" });
+
+    await expect(client.listSites()).rejects.toThrow();
+    await client.listSites();
+
+    expect(mocks.getAccessToken).toHaveBeenCalledTimes(2);
+  });
+
   it("fetches the Google account email from userinfo", async () => {
     mocks.fetch.mockResolvedValue(
       jsonResponse({ email: "client@example.com" }),

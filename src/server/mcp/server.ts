@@ -1,6 +1,7 @@
 import {
   type CallToolResult,
   McpServer,
+  type StandardSchemaWithJSON,
   type ToolAnnotations,
 } from "@modelcontextprotocol/server";
 import type { z } from "zod";
@@ -96,15 +97,70 @@ type OpenSeoToolDefinition<Input extends ToolSchema> = {
   ) => CallToolResult | Promise<CallToolResult>;
 };
 
+/** Wraps a Zod schema as a Standard Schema whose JSON Schema conversion is
+ *  computed once per isolate. The SDK converts every registered tool's input
+ *  and output schema to JSON Schema at registration, and a fresh server (with
+ *  every tool) is built per MCP request — ~90 z.toJSONSchema() calls per
+ *  request, which pushed small Search Console calls past the Workers CPU limit
+ *  (error 1102). Validation still delegates to the Zod schema. */
+function memoizeJsonSchema(schema: z.ZodType): StandardSchemaWithJSON {
+  const standard = schema["~standard"];
+  const cache = new Map<string, Record<string, unknown>>();
+  const convert =
+    (io: "input" | "output") =>
+    (options: { readonly target: string }): Record<string, unknown> => {
+      const key = `${io}:${options.target}`;
+      let json = cache.get(key);
+      if (!json) {
+        json = standard.jsonSchema[io](options);
+        cache.set(key, json);
+      }
+      return json;
+    };
+  return {
+    "~standard": {
+      version: standard.version,
+      vendor: standard.vendor,
+      validate: standard.validate,
+      jsonSchema: { input: convert("input"), output: convert("output") },
+    },
+  };
+}
+
+type RegisteredToolSchemas = {
+  input: StandardSchemaWithJSON;
+  output?: StandardSchemaWithJSON;
+  outputValidator?: z.ZodType;
+};
+
+// Keyed by the module-level tool definition, so schemas are normalized and
+// converted once per isolate instead of on every request.
+const toolSchemaCache = new WeakMap<object, RegisteredToolSchemas>();
+
+function getToolSchemas(tool: {
+  config: { inputSchema: ToolSchema; outputSchema?: ToolSchema };
+}): RegisteredToolSchemas {
+  const cached = toolSchemaCache.get(tool);
+  if (cached) return cached;
+  const outputValidator = objectSchema(tool.config.outputSchema);
+  const schemas: RegisteredToolSchemas = {
+    input: memoizeJsonSchema(objectSchema(tool.config.inputSchema)),
+    output: outputValidator ? memoizeJsonSchema(outputValidator) : undefined,
+    outputValidator,
+  };
+  toolSchemaCache.set(tool, schemas);
+  return schemas;
+}
+
 function registerOpenSeoTool<Input extends ToolSchema>(
   server: McpServer,
   tool: OpenSeoToolDefinition<Input>,
   authProps: McpProps,
 ) {
-  const outputSchema = objectSchema(tool.config.outputSchema);
+  const schemas = getToolSchemas(tool);
   const handler = instrumentMcpToolHandler(
     tool.name,
-    outputSchema,
+    schemas.outputValidator,
     tool.handler,
   );
 
@@ -112,8 +168,8 @@ function registerOpenSeoTool<Input extends ToolSchema>(
     tool.name,
     {
       ...tool.config,
-      inputSchema: objectSchema(tool.config.inputSchema),
-      outputSchema,
+      inputSchema: schemas.input,
+      outputSchema: schemas.output,
     },
     (args, context) => {
       return handler(
